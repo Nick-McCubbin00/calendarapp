@@ -33,6 +33,9 @@ export default function App() {
     const infoTimerRef = useRef(null);
     const [editingNotesId, setEditingNotesId] = useState(null);
     const [noteDraft, setNoteDraft] = useState('');
+    const [editingMoveId, setEditingMoveId] = useState(null);
+    const [moveDraft, setMoveDraft] = useState('');
+    const [dragReminderId, setDragReminderId] = useState(null);
 
     // Load reminders from Firestore if configured, else fallback to localStorage
     useEffect(() => {
@@ -118,6 +121,7 @@ export default function App() {
         setError('');
 
         const planned = new Date(inputDate);
+        const plannedAdjusted = adjustToNextWeekday(planned);
         const days = parseInt(reminderDays, 10);
 
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -125,7 +129,7 @@ export default function App() {
             id,
             category: category.trim(),
             reminderDays: days,
-            plannedDate: planned.toISOString(),
+            plannedDate: plannedAdjusted.toISOString(),
             lastUpdated: null,
             nextUpdate: null,
             // keep a backlog of previous update dates (rendered as blue)
@@ -153,8 +157,9 @@ export default function App() {
             const newLastUpdated = new Date(completedDate);
             const newNext = new Date(newLastUpdated);
             newNext.setDate(newNext.getDate() + r.reminderDays);
+            const adjustedNext = adjustToNextWeekday(newNext);
             // After finishing (green), next cycle becomes planned (blue)
-            const updated = { ...r, plannedDate: newNext.toISOString(), lastUpdated: newLastUpdated.toISOString(), nextUpdate: newNext.toISOString(), history: backlog };
+            const updated = { ...r, plannedDate: adjustedNext.toISOString(), lastUpdated: newLastUpdated.toISOString(), nextUpdate: adjustedNext.toISOString(), history: backlog };
             if (db) {
                 updateDoc(doc(collection(db, 'reminders'), r.id), updated).catch((e) => setRemoteError(e?.message || 'Failed to update on server'));
             }
@@ -166,12 +171,13 @@ export default function App() {
     const setStatusBlue = (reminderId, targetDate) => {
         setReminders((prev) => prev.map((r) => {
             if (r.id !== reminderId) return r;
+            const adjusted = adjustToNextWeekday(new Date(targetDate));
             const updated = {
                 ...r,
-                plannedDate: new Date(targetDate).toISOString(),
+                plannedDate: adjusted.toISOString(),
                 // if we are reverting the same-day green, clear it
                 lastUpdated: (formatDate(r.lastUpdated) === formatDate(targetDate)) ? null : r.lastUpdated,
-                nextUpdate: null,
+                nextUpdate: adjusted.toISOString(),
             };
             if (db) updateDoc(doc(collection(db, 'reminders'), r.id), updated).catch((e) => setRemoteError(e?.message || 'Failed to update on server'));
             return updated;
@@ -243,6 +249,55 @@ export default function App() {
         setNoteDraft('');
     };
 
+    // Ensure instances fall on weekdays (Mon-Fri). If Sat -> +2 days, if Sun -> +1 day
+    const adjustToNextWeekday = (date) => {
+        const d = new Date(date);
+        const day = d.getDay();
+        if (day === 6) d.setDate(d.getDate() + 2);
+        if (day === 0) d.setDate(d.getDate() + 1);
+        return d;
+    };
+
+    const setPlannedDateForReminder = (reminderId, newDate) => {
+        const adjusted = adjustToNextWeekday(new Date(newDate));
+        setReminders((prev) => prev.map((r) => {
+            if (r.id !== reminderId) return r;
+            const updated = { ...r, plannedDate: adjusted.toISOString(), nextUpdate: adjusted.toISOString() };
+            if (db) updateDoc(doc(collection(db, 'reminders'), r.id), updated).catch((e) => setRemoteError(e?.message || 'Failed to update on server'));
+            return updated;
+        }));
+        setEditingMoveId(null);
+        setMoveDraft('');
+    };
+
+    const skipCurrentOccurrence = (reminderId) => {
+        setReminders((prev) => prev.map((r) => {
+            if (r.id !== reminderId) return r;
+            const base = r.nextUpdate ? new Date(r.nextUpdate) : (r.plannedDate ? new Date(r.plannedDate) : null);
+            if (!base) return r;
+            base.setDate(base.getDate() + r.reminderDays);
+            const adjusted = adjustToNextWeekday(base);
+            const updated = { ...r, plannedDate: adjusted.toISOString(), nextUpdate: adjusted.toISOString() };
+            if (db) updateDoc(doc(collection(db, 'reminders'), r.id), updated).catch((e) => setRemoteError(e?.message || 'Failed to update on server'));
+            return updated;
+        }));
+    };
+
+    // Drag & Drop handlers for moving a single occurrence
+    const handleDragStart = (reminderId) => {
+        setDragReminderId(reminderId);
+    };
+
+    const handleDragEnd = () => {
+        setDragReminderId(null);
+    };
+
+    const handleDropOnDay = (targetDate) => {
+        if (!dragReminderId) return;
+        setPlannedDateForReminder(dragReminderId, targetDate);
+        setDragReminderId(null);
+    };
+
     // no range-based color mapping
 
     // Calendar rendering logic
@@ -280,6 +335,8 @@ export default function App() {
                     key={dayStr}
                     className={dayClasses + " cursor-pointer hover:bg-gray-50"}
                     onClick={() => setSelectedDayStr(dayStr)}
+                    onDragOver={(e) => { e.preventDefault(); }}
+                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleDropOnDay(dayDate); }}
                 >
                     <span className="font-medium text-gray-700">{day}</span>
                     <div className="mt-1 w-full space-y-1">
@@ -307,6 +364,9 @@ export default function App() {
                                 key={`s-${r.id}`}
                                 onClick={(e) => { e.stopPropagation(); handleCompleteReminder(r.id, dayDate); }}
                                 className={`w-full text-[10px] text-white rounded-lg shadow px-1.5 py-0.5 truncate transition-colors bg-blue-500 hover:bg-blue-400`}
+                                draggable
+                                onDragStart={(e) => { e.stopPropagation(); handleDragStart(r.id); }}
+                                onDragEnd={(e) => { e.stopPropagation(); handleDragEnd(); }}
                                 title={`'${r.category}' scheduled on ${new Date(r.plannedDate).toLocaleDateString()} (click to mark done)`}
                             >
                                 <div className="flex justify-between items-center">
