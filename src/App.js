@@ -28,7 +28,7 @@ export default function App() {
     // weekly upcoming removed
     const [remoteError, setRemoteError] = useState('');
     const [usingRemote, setUsingRemote] = useState(false);
-    // simplified colors: blue/green/red only
+    // simplified colors: blue/green only
     const [infoMessage, setInfoMessage] = useState('');
     const infoTimerRef = useRef(null);
     const [editingNotesId, setEditingNotesId] = useState(null);
@@ -36,6 +36,12 @@ export default function App() {
     const [editingMoveId, setEditingMoveId] = useState(null);
     const [moveDraft, setMoveDraft] = useState('');
     const [dragReminderId, setDragReminderId] = useState(null);
+    const [activeTab, setActiveTab] = useState('calendar'); // 'calendar' | 'nick'
+    const [tasks, setTasks] = useState([]);
+    const [taskTitle, setTaskTitle] = useState('');
+    const [taskDate, setTaskDate] = useState('');
+    const [taskTime, setTaskTime] = useState('');
+    const [taskError, setTaskError] = useState('');
 
     // Load reminders from Firestore if configured, else fallback to localStorage
     useEffect(() => {
@@ -73,6 +79,34 @@ export default function App() {
             } catch (_) {}
         }
     }, []);
+
+    // Load Nick tasks from Firestore if configured, else from localStorage
+    useEffect(() => {
+        if (db) {
+            const unsub = onSnapshot(collection(db, 'tasks'), (snap) => {
+                const rows = [];
+                snap.forEach((d) => rows.push(d.data()));
+                setTasks(rows);
+                try { localStorage.setItem('tasks', JSON.stringify(rows)); } catch (_) {}
+            }, (err) => {
+                setRemoteError(err?.message || 'Task sync error');
+            });
+            return () => unsub();
+        } else {
+            try {
+                const saved = localStorage.getItem('tasks');
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    if (Array.isArray(parsed)) setTasks(parsed);
+                }
+            } catch (_) {}
+        }
+    }, []);
+
+    // Persist tasks to localStorage cache
+    useEffect(() => {
+        try { localStorage.setItem('tasks', JSON.stringify(tasks)); } catch (_) {}
+    }, [tasks]);
 
     // Persist reminders to localStorage as cache for offline/fallback
     useEffect(() => {
@@ -298,6 +332,35 @@ export default function App() {
         setDragReminderId(null);
     };
 
+    // Nick tasks handlers
+    const handleAddTask = () => {
+        if (!taskTitle || !taskDate || !taskTime) {
+            setTaskError('Please fill in title, date and time.');
+            return;
+        }
+        setTaskError('');
+        const due = new Date(`${taskDate}T${taskTime}`);
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const newTask = {
+            id,
+            title: taskTitle.trim(),
+            dueAt: due.toISOString(),
+            createdAt: serverTimestamp ? serverTimestamp() : null,
+        };
+        setTasks((prev) => [...prev, newTask]);
+        if (db) {
+            setDoc(doc(collection(db, 'tasks'), id), newTask).catch((e) => setRemoteError(e?.message || 'Failed to save task'));
+        }
+        setTaskTitle('');
+        setTaskDate('');
+        setTaskTime('');
+    };
+
+    const handleDeleteTask = (taskId) => {
+        setTasks((prev) => prev.filter((t) => t.id !== taskId));
+        if (db) deleteDoc(doc(collection(db, 'tasks'), taskId)).catch((e) => setRemoteError(e?.message || 'Failed to delete task'));
+    };
+
     // no range-based color mapping
 
     // Calendar rendering logic
@@ -406,8 +469,13 @@ export default function App() {
     return (
         <div className="bg-gray-50 min-h-screen flex items-center justify-center p-4 font-sans">
             <div className="w-full max-w-7xl mx-auto space-y-4">
+                {/* Tabs */}
+                <div className="flex items-center gap-2">
+                    <button onClick={() => setActiveTab('calendar')} className={`px-3 py-2 rounded-lg text-sm font-semibold border ${activeTab==='calendar' ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}>Calendar</button>
+                    <button onClick={() => setActiveTab('nick')} className={`px-3 py-2 rounded-lg text-sm font-semibold border ${activeTab==='nick' ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}>Nick</button>
+                </div>
 
-                {/* --- Calendar Display --- */}
+                {activeTab === 'calendar' && (
                 <div className="bg-white p-6 rounded-2xl shadow-lg border border-gray-200">
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-xl font-bold text-gray-800">{monthNames[month]} {year}</h3>
@@ -439,6 +507,48 @@ export default function App() {
                         </div>
                     )}
                 </div>
+                )}
+
+                {activeTab === 'nick' && (
+                <div className="bg-white p-6 rounded-2xl shadow-lg border border-gray-200">
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-xl font-bold text-gray-800">Nick's Tasks</h3>
+                        <span className="text-xs text-gray-600">{usingRemote ? 'Synced' : 'Offline'}</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+                        <input type="text" placeholder="Task title" value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+                        <input type="date" value={taskDate} onChange={(e) => setTaskDate(e.target.value)} className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+                        <input type="time" value={taskTime} onChange={(e) => setTaskTime(e.target.value)} className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+                    </div>
+                    {taskError && (
+                        <div className="mb-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2 flex items-start gap-2">
+                            <AlertTriangle size={14} />
+                            <span>{taskError}</span>
+                        </div>
+                    )}
+                    <button onClick={handleAddTask} className="bg-blue-600 text-white text-sm font-semibold px-3 py-2 rounded-lg hover:bg-blue-700 mb-4">Add Task</button>
+                    <div className="space-y-2">
+                        {tasks.length === 0 ? (
+                            <p className="text-sm text-gray-500">No tasks yet.</p>
+                        ) : (
+                            tasks
+                                .slice()
+                                .sort((a,b) => new Date(a.dueAt) - new Date(b.dueAt))
+                                .map((t) => (
+                                    <div key={t.id} className="flex items-center justify-between bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                                        <div className="min-w-0">
+                                            <div className="text-sm font-semibold text-gray-800 truncate">{t.title}</div>
+                                            <div className="text-xs text-gray-600">Due {new Date(t.dueAt).toLocaleString()}</div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <button className="text-xs bg-gray-200 text-gray-700 rounded px-2 py-1 hover:bg-gray-300" onClick={() => handleDeleteTask(t.id)}><Trash2 size={14} /> Delete</button>
+                                        </div>
+                                    </div>
+                                ))
+                        )}
+                    </div>
+                </div>
+                )}
             </div>
 
             {/* Weekly Upcoming panel removed */}
